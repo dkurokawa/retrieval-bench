@@ -23,33 +23,48 @@ from retrieval_bench.runs import (
 )
 
 
-def _build_retriever(
-    args: argparse.Namespace, dataset: datasets.Dataset
-) -> tuple[Retriever, dict[str, Any]]:
-    chunk_params = {"chunk_size": args.chunk_size, "chunk_overlap": args.overlap}
+def _k1_type(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"k1 must be >= 0, got {parsed}")
+    return parsed
 
+
+def _b_type(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError(f"b must be between 0 and 1, got {parsed}")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
+    return parsed
+
+
+def _build_retriever(args: argparse.Namespace) -> tuple[Retriever, dict[str, Any]]:
     if args.retriever == "bm25":
         return BM25Retriever(k1=args.k1, b=args.b), {"k1": args.k1, "b": args.b}
 
     if args.retriever == "dense":
         model_name = args.model or DEFAULT_MODEL_NAME
-        dense = DenseRetriever(
-            model_name=model_name,
-            chunk_params=chunk_params,
-            corpus_sha256=dataset.corpus_sha256,
-        )
+        dense = DenseRetriever(model_name=model_name)
         return dense, {"model": model_name}
 
     if args.retriever == "hybrid":
         model_name = args.model or DEFAULT_MODEL_NAME
         bm25 = BM25Retriever(k1=args.k1, b=args.b)
-        dense = DenseRetriever(
-            model_name=model_name,
-            chunk_params=chunk_params,
-            corpus_sha256=dataset.corpus_sha256,
-        )
-        hybrid = HybridRetriever(bm25, dense, rrf_k=args.rrf_k)
-        params = {"k1": args.k1, "b": args.b, "model": model_name, "rrf_k": args.rrf_k}
+        dense = DenseRetriever(model_name=model_name)
+        hybrid = HybridRetriever(bm25, dense, rrf_k=args.rrf_k, depth=args.rrf_depth)
+        params = {
+            "k1": args.k1,
+            "b": args.b,
+            "model": model_name,
+            "rrf_k": args.rrf_k,
+            "rrf_depth": args.rrf_depth,
+        }
         return hybrid, params
 
     raise ValueError(f"unknown retriever {args.retriever!r}")
@@ -63,7 +78,7 @@ def cmd_download(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     dataset = datasets.load(args.dataset)
-    retriever, retriever_params = _build_retriever(args, dataset)
+    retriever, retriever_params = _build_retriever(args)
     result = run(
         dataset,
         retriever,
@@ -162,9 +177,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--model", default=None, help="sentence-transformers model name")
     p_run.add_argument("--chunk-size", type=int, default=None, dest="chunk_size")
     p_run.add_argument("--overlap", type=int, default=0)
-    p_run.add_argument("--k1", type=float, default=0.9)
-    p_run.add_argument("--b", type=float, default=0.4)
-    p_run.add_argument("--rrf-k", type=int, default=60, dest="rrf_k")
+    p_run.add_argument("--k1", type=_k1_type, default=0.9)
+    p_run.add_argument("--b", type=_b_type, default=0.4)
+    p_run.add_argument("--rrf-k", type=_positive_int, default=60, dest="rrf_k")
+    p_run.add_argument(
+        "--rrf-depth",
+        type=_positive_int,
+        default=1000,
+        dest="rrf_depth",
+        help="fuse only each retriever's top-N candidates for hybrid (default: 1000)",
+    )
     p_run.add_argument("--db", default=str(DEFAULT_DB_PATH))
     p_run.set_defaults(func=cmd_run)
 
