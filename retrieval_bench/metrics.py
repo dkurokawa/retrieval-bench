@@ -19,11 +19,24 @@ def _positive_relevant(qrels: Qrels) -> dict[str, int]:
     return {doc_id: rel for doc_id, rel in qrels.items() if rel > 0}
 
 
+def _dedupe_preserving_order(ranked_doc_ids: Sequence[str]) -> list[str]:
+    """Drop repeated doc_ids, keeping only their first (best-ranked) occurrence."""
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for doc_id in ranked_doc_ids:
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        deduped.append(doc_id)
+    return deduped
+
+
 def recall_at_k(ranked_doc_ids: Sequence[str], qrels: Qrels, k: int) -> float | None:
     """Fraction of relevant documents present in the top ``k`` results."""
     relevant = _positive_relevant(qrels)
     if not relevant:
         return None
+    ranked_doc_ids = _dedupe_preserving_order(ranked_doc_ids)
     top_k = set(ranked_doc_ids[:k])
     hits = len(top_k & relevant.keys())
     return hits / len(relevant)
@@ -35,11 +48,16 @@ def dcg_at_k(gains: Sequence[float], k: int) -> float:
 
 
 def ndcg_at_k(ranked_doc_ids: Sequence[str], qrels: Qrels, k: int) -> float | None:
-    """Normalized discounted cumulative gain, using graded relevance."""
+    """Normalized discounted cumulative gain, using graded relevance.
+
+    A relevance grade below 0 contributes a gain of 0 (treated as
+    non-relevant, never as a penalty) rather than reducing the DCG.
+    """
     relevant = _positive_relevant(qrels)
     if not relevant:
         return None
-    gains = [qrels.get(doc_id, 0) for doc_id in ranked_doc_ids[:k]]
+    ranked_doc_ids = _dedupe_preserving_order(ranked_doc_ids)
+    gains = [max(qrels.get(doc_id, 0), 0) for doc_id in ranked_doc_ids[:k]]
     dcg = dcg_at_k(gains, k)
     ideal_gains = sorted(relevant.values(), reverse=True)
     idcg = dcg_at_k(ideal_gains, k)
@@ -51,6 +69,7 @@ def mrr_at_k(ranked_doc_ids: Sequence[str], qrels: Qrels, k: int) -> float | Non
     relevant = _positive_relevant(qrels)
     if not relevant:
         return None
+    ranked_doc_ids = _dedupe_preserving_order(ranked_doc_ids)
     for rank, doc_id in enumerate(ranked_doc_ids[:k], start=1):
         if doc_id in relevant:
             return 1.0 / rank
