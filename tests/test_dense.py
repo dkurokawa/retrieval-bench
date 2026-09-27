@@ -95,16 +95,57 @@ def test_dense_empty_index_returns_empty_results(tmp_path: Path) -> None:
     assert retriever.search("cat", k=10) == []
 
 
-def test_dense_without_encoder_fails_helpfully_when_sentence_transformers_missing(
-    tmp_path: Path,
+def test_dense_lazily_builds_the_default_encoder_when_none_is_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # No `encoder=` passed, and this test environment doesn't have the
-    # optional `[dense]` extra installed (mirrors the CI lint/test job).
+    # No `encoder=` passed: DenseRetriever must fall back to
+    # SentenceTransformerEncoder(model_name), built lazily on first use.
+    # We substitute a fake class here so this test needs neither the
+    # optional `[dense]` extra nor network access, regardless of whether
+    # sentence-transformers happens to be installed in this environment.
+    built_with: list[str] = []
+
+    class DummySentenceTransformerEncoder:
+        def __init__(self, model_name: str) -> None:
+            built_with.append(model_name)
+
+        def encode(self, texts: Sequence[str]) -> np.ndarray:
+            return np.ones((len(texts), 2), dtype=np.float64)
+
+    monkeypatch.setattr(
+        "retrieval_bench.retrievers.dense.SentenceTransformerEncoder",
+        DummySentenceTransformerEncoder,
+    )
+
     retriever = DenseRetriever(
-        model_name="any-model",
+        model_name="some-model",
         chunk_params={"chunk_size": None, "chunk_overlap": 0},
         corpus_sha256="deadbeef",
         cache_dir=tmp_path,
     )
+    retriever.index([Chunk(doc_id="d1", chunk_index=0, text="cat")])
+
+    assert built_with == ["some-model"]
+
+
+def test_sentence_transformer_encoder_missing_dependency_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Simulate `sentence-transformers` not being importable (the CI lint/test
+    # job runs without the `[dense]` extra) without depending on whether it
+    # actually happens to be installed in this environment.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "sentence_transformers":
+            raise ImportError("no module named sentence_transformers")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    from retrieval_bench.retrievers.dense import SentenceTransformerEncoder
+
     with pytest.raises(ImportError, match="uv sync --extra dense"):
-        retriever.index([Chunk(doc_id="d1", chunk_index=0, text="cat")])
+        SentenceTransformerEncoder("any-model")
