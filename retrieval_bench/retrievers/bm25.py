@@ -62,6 +62,10 @@ class BM25Retriever:
     """
 
     def __init__(self, k1: float = 0.9, b: float = 0.4, use_stopwords: bool = False) -> None:
+        if k1 < 0:
+            raise ValueError(f"k1 must be >= 0, got {k1}")
+        if not 0.0 <= b <= 1.0:
+            raise ValueError(f"b must be between 0 and 1, got {b}")
         self.k1 = k1
         self.b = b
         self._stopwords = DEFAULT_STOPWORDS if use_stopwords else None
@@ -101,6 +105,14 @@ class BM25Retriever:
         self._idf = np.log(1.0 + (n_chunks - df + 0.5) / (df + 0.5))
 
     def search(self, query: str, k: int) -> list[tuple[str, float]]:
+        """Return up to ``k`` ``(doc_id, score)`` pairs with score > 0.
+
+        Documents with no matching query term (score 0) are never returned:
+        a BM25 score of 0 means "no evidence this document is relevant to
+        this query," which is a different thing from "known relevant with a
+        low score," and callers (recall/nDCG/hybrid fusion) should not treat
+        it as a ranked candidate.
+        """
         if self._tf is None or self._idf is None or self._doc_len is None:
             raise RuntimeError("BM25Retriever.search called before index()")
         if not self._chunks:
@@ -125,5 +137,6 @@ class BM25Retriever:
             scores += self._idf[col] * contribution
 
         chunk_scores = list(zip(self._chunks, scores.tolist(), strict=True))
-        ranked = aggregate_max_by_doc(chunk_scores)
+        doc_scores = aggregate_max_by_doc(chunk_scores)
+        ranked = [(doc_id, score) for doc_id, score in doc_scores if score > 0]
         return ranked[:k]

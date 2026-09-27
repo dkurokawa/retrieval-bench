@@ -43,7 +43,8 @@ def test_bm25_score_matches_hand_computed_value_single_term() -> None:
     retriever = make_index()
     results = dict(retriever.search("dog", k=10))
     assert results["doc1"] == pytest.approx(0.908261822802687)
-    assert results["doc2"] == pytest.approx(0.0)
+    # doc2 has no "dog" at all (score 0): it must not be returned.
+    assert "doc2" not in results
 
 
 def test_bm25_score_matches_hand_computed_value_two_terms() -> None:
@@ -55,15 +56,16 @@ def test_bm25_score_matches_hand_computed_value_two_terms() -> None:
 
 def test_bm25_ranks_by_descending_score() -> None:
     retriever = make_index()
-    ranked = retriever.search("dog", k=10)
+    ranked = retriever.search("cat dog", k=10)
     assert [doc_id for doc_id, _ in ranked] == ["doc1", "doc2"]
 
 
-def test_bm25_unknown_query_term_contributes_nothing() -> None:
+def test_bm25_only_returns_documents_with_a_positive_score() -> None:
+    # "dog" matches nothing in doc2, and "nonexistentword" matches nothing at
+    # all: neither should ever appear in the results, at any k.
     retriever = make_index()
-    results = dict(retriever.search("nonexistentword", k=10))
-    assert results["doc1"] == pytest.approx(0.0)
-    assert results["doc2"] == pytest.approx(0.0)
+    assert dict(retriever.search("dog", k=10)).keys() == {"doc1"}
+    assert retriever.search("nonexistentword", k=10) == []
 
 
 def test_bm25_respects_k() -> None:
@@ -80,9 +82,25 @@ def test_bm25_max_pools_multiple_chunks_per_document() -> None:
     ]
     retriever.index(chunks)
     results = dict(retriever.search("dog", k=10))
-    # doc1's best chunk (chunk_index=0) should dominate; doc2 has no "dog" at all.
+    # doc1's best chunk (chunk_index=0) should dominate; doc2 has no "dog" at
+    # all, so it must be absent (not present with score 0.0).
     assert results["doc1"] > 0.0
-    assert results["doc2"] == pytest.approx(0.0)
+    assert "doc2" not in results
+
+
+def test_bm25_ranking_is_not_driven_by_doc_id_lexical_order() -> None:
+    # The document with the lexically *last* id is the best match; a bug that
+    # let doc_id ordering leak into ranking (instead of only breaking exact
+    # score ties) would put it last instead of first.
+    retriever = BM25Retriever(k1=0.9, b=0.4)
+    chunks = [
+        Chunk(doc_id="zzz_best_match", chunk_index=0, text="dog dog dog dog"),
+        Chunk(doc_id="mmm_medium_match", chunk_index=0, text="dog cat cat cat"),
+        Chunk(doc_id="aaa_no_match", chunk_index=0, text="cat cat cat cat"),
+    ]
+    retriever.index(chunks)
+    ranked = retriever.search("dog", k=10)
+    assert [doc_id for doc_id, _ in ranked] == ["zzz_best_match", "mmm_medium_match"]
 
 
 def test_bm25_search_before_index_raises() -> None:
@@ -100,5 +118,27 @@ def test_bm25_empty_index_returns_empty_results() -> None:
 def test_bm25_handles_all_empty_chunks_without_dividing_by_zero() -> None:
     retriever = BM25Retriever()
     retriever.index([Chunk(doc_id="doc1", chunk_index=0, text="")])
-    # avgdl is 0 here; search must not raise or produce NaN/inf scores.
-    assert retriever.search("dog", k=10) == [("doc1", 0.0)]
+    # avgdl is 0 here; search must not raise, produce NaN/inf, or return a
+    # zero-score "match".
+    assert retriever.search("dog", k=10) == []
+
+
+@pytest.mark.parametrize("k1", [-1.0, -0.01])
+def test_bm25_rejects_negative_k1(k1: float) -> None:
+    with pytest.raises(ValueError, match="k1"):
+        BM25Retriever(k1=k1)
+
+
+@pytest.mark.parametrize("b", [-0.01, 1.01, 2.0])
+def test_bm25_rejects_b_outside_unit_interval(b: float) -> None:
+    with pytest.raises(ValueError, match="b must be between 0 and 1"):
+        BM25Retriever(b=b)
+
+
+@pytest.mark.parametrize("b", [0.0, 1.0, 0.5])
+def test_bm25_accepts_b_at_unit_interval_boundaries(b: float) -> None:
+    BM25Retriever(b=b)  # must not raise
+
+
+def test_bm25_accepts_k1_zero() -> None:
+    BM25Retriever(k1=0.0)  # must not raise
