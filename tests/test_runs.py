@@ -203,3 +203,37 @@ def test_run_records_the_encoder_identifier_for_a_dense_retriever(tmp_path: Path
         chunk_overlap=0,
     )
     assert result.meta["encoder_identifier"] == "fake-encoder-v1"
+
+
+def test_save_run_is_all_or_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import retrieval_bench.runs as runs_module
+
+    dataset = load_dir(FIXTURE_DIR, name="tiny")
+    retriever = BM25Retriever()
+    result = run(
+        dataset,
+        retriever,
+        retriever_name="bm25",
+        retriever_params={"k1": 0.9, "b": 0.4},
+        chunk_size=None,
+        chunk_overlap=0,
+    )
+    con = connect(tmp_path / "results.duckdb")
+
+    real_insert = runs_module._insert_run
+
+    def fail_after_runs_row(c: object, r: object) -> None:
+        c.execute(  # type: ignore[attr-defined]
+            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [r.run_id, r.created_at, r.dataset, r.retriever, "{}", None, 0, "{}"],  # type: ignore[attr-defined]
+        )
+        raise RuntimeError("interrupted mid-save")
+
+    monkeypatch.setattr(runs_module, "_insert_run", fail_after_runs_row)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        save_run(con, result)
+    assert fetch_runs(con) == []
+
+    monkeypatch.setattr(runs_module, "_insert_run", real_insert)
+    save_run(con, result)
+    assert len(fetch_runs(con)) == 1

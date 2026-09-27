@@ -188,7 +188,21 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def save_run(con: duckdb.DuckDBPyConnection, result: RunResult) -> None:
-    """Persist a run's metadata, mean metrics, and per-query metrics."""
+    """Persist a run's metadata, mean metrics, and per-query metrics.
+
+    All three tables are written in one transaction, so an interrupted save
+    never leaves a partial run for `compare` / `diff` to read as complete.
+    """
+    con.execute("BEGIN TRANSACTION")
+    try:
+        _insert_run(con, result)
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def _insert_run(con: duckdb.DuckDBPyConnection, result: RunResult) -> None:
     con.execute(
         "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [

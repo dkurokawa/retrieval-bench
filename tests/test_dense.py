@@ -299,3 +299,17 @@ def test_sentence_transformer_encoder_missing_dependency_message(
 
     with pytest.raises(ImportError, match="uv sync --extra dense"):
         SentenceTransformerEncoder("any-model")
+
+
+def test_uncacheable_encoder_never_reads_or_writes_the_cache(tmp_path: Path) -> None:
+    # An encoder that can't pin its model version must not reuse vectors a
+    # different version of the same model produced.
+    encoder = FakeEncoder()
+    encoder.cacheable = False  # type: ignore[attr-defined]
+    chunks = [Chunk(doc_id="d1", chunk_index=0, text="cat")]
+
+    make_retriever(tmp_path, encoder=encoder).index(chunks)
+    make_retriever(tmp_path, encoder=encoder).index(chunks)
+
+    assert encoder.calls == 2
+    assert list(tmp_path.glob("*.npy")) == []

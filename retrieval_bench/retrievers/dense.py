@@ -57,7 +57,12 @@ class SentenceTransformerEncoder:
                 "install it with `uv sync --extra dense`"
             ) from exc
         self._model = SentenceTransformer(model_name)
-        revision = _model_revision(self._model) or "unknown"
+        found_revision = _model_revision(self._model)
+        # Without a revision the identifier cannot tell two versions of the same
+        # model name apart, so cached vectors could silently outlive a weights
+        # update. Such an encoder is marked uncacheable instead.
+        self.cacheable = found_revision is not None
+        revision = found_revision or "unknown"
         self._identifier = (
             f"sentence-transformers:{model_name}:st={st_module.__version__}:revision={revision}"
         )
@@ -155,6 +160,11 @@ class DenseRetriever:
 
         encoder = self._get_encoder()
         self.encoder_identifier = encoder.identifier()
+
+        if not getattr(encoder, "cacheable", True):
+            raw = np.asarray(encoder.encode([c.text for c in self._chunks]), dtype=np.float64)
+            self._vectors = _normalize(raw)
+            return
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         signature = chunks_signature(self._chunks)
