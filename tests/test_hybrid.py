@@ -84,3 +84,68 @@ def test_index_forwards_chunks_to_both_sub_retrievers() -> None:
 
     assert bm25.indexed_doc_ids == {"d1", "d2", "d3"}
     assert dense.indexed_doc_ids == {"d1", "d2", "d3"}
+
+
+def test_hybrid_only_fuses_each_retrievers_top_depth_candidates() -> None:
+    # 5 candidates on each side, but depth=2: only ranks 1-2 from each side
+    # are eligible to contribute. "tail" appears at rank 5 on both sides, so
+    # with full-corpus fusion it would still show up (weakly); with
+    # depth-limited fusion it must not appear at all.
+    bm25 = FixedRankingRetriever([("a", 5.0), ("b", 4.0), ("c", 3.0), ("d", 2.0), ("tail", 1.0)])
+    dense = FixedRankingRetriever([("b", 0.9), ("a", 0.8), ("e", 0.7), ("f", 0.6), ("tail", 0.5)])
+    hybrid = HybridRetriever(bm25, dense, rrf_k=60, depth=2)  # type: ignore[arg-type]
+    hybrid.index([Chunk(doc_id=f"d{i}", chunk_index=0, text="x") for i in range(5)])
+
+    results = dict(hybrid.search("q", k=10))
+
+    assert "tail" not in results
+    assert set(results) == {"a", "b"}
+    # a: bm25 rank 1, dense rank 2. b: bm25 rank 2, dense rank 1.
+    assert results["a"] == pytest.approx(1 / 61 + 1 / 62)
+    assert results["b"] == pytest.approx(1 / 62 + 1 / 61)
+
+
+def test_hybrid_depth_does_not_limit_the_number_of_results_returned() -> None:
+    # A doc within depth on just one side, with nothing beyond depth on the
+    # other, must still come back if k allows it.
+    bm25 = FixedRankingRetriever([("a", 1.0), ("b", 1.0)])
+    dense = FixedRankingRetriever([("c", 1.0), ("d", 1.0)])
+    hybrid = HybridRetriever(bm25, dense, rrf_k=60, depth=2)  # type: ignore[arg-type]
+    hybrid.index([Chunk(doc_id=f"d{i}", chunk_index=0, text="x") for i in range(4)])
+
+    results = hybrid.search("q", k=10)
+    assert {doc_id for doc_id, _ in results} == {"a", "b", "c", "d"}
+
+
+@pytest.mark.parametrize("rrf_k", [0, -1])
+def test_hybrid_rejects_non_positive_rrf_k(rrf_k: int) -> None:
+    bm25 = FixedRankingRetriever([])
+    dense = FixedRankingRetriever([])
+    with pytest.raises(ValueError, match="rrf_k"):
+        HybridRetriever(bm25, dense, rrf_k=rrf_k)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("depth", [0, -1])
+def test_hybrid_rejects_non_positive_depth(depth: int) -> None:
+    bm25 = FixedRankingRetriever([])
+    dense = FixedRankingRetriever([])
+    with pytest.raises(ValueError, match="depth"):
+        HybridRetriever(bm25, dense, depth=depth)  # type: ignore[arg-type]
+
+
+def test_hybrid_ranking_is_not_driven_by_doc_id_lexical_order() -> None:
+    # The best-fused document has the lexically *last* id; a bug that let
+    # doc_id ordering leak into ranking (instead of only breaking exact score
+    # ties) would put it last instead of first.
+    bm25 = FixedRankingRetriever([("zzz_best", 5.0), ("aaa_worst", 1.0)])
+    dense = FixedRankingRetriever([("zzz_best", 0.9), ("aaa_worst", 0.1)])
+    hybrid = HybridRetriever(bm25, dense, rrf_k=60)  # type: ignore[arg-type]
+    hybrid.index(
+        [
+            Chunk(doc_id="zzz_best", chunk_index=0, text="x"),
+            Chunk(doc_id="aaa_worst", chunk_index=0, text="x"),
+        ]
+    )
+
+    ranked = hybrid.search("q", k=2)
+    assert [doc_id for doc_id, _ in ranked] == ["zzz_best", "aaa_worst"]
