@@ -16,10 +16,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
+
+_COMPLETE_MARKER = ".rbench-complete"
+_REQUIRED_FILES = ("corpus.jsonl", "queries.jsonl", os.path.join("qrels", "test.tsv"))
 
 
 @dataclass(frozen=True)
@@ -40,13 +45,17 @@ class Doc:
 
 @dataclass(frozen=True)
 class Dataset:
-    """An in-memory BEIR-format dataset."""
+    """An in-memory BEIR-format dataset, with provenance hashes for the raw
+    files it was loaded from (recorded with each run for reproducibility)."""
 
     name: str
     corpus: dict[str, Doc]
     queries: dict[str, str]
     qrels: dict[str, dict[str, int]]
     corpus_sha256: str
+    queries_sha256: str
+    qrels_sha256: str
+    split: str
 
 
 @dataclass(frozen=True)
@@ -87,11 +96,26 @@ def dataset_dir(name: str, cache_dir: Path | None = None) -> Path:
     return root / name
 
 
+def _is_complete(path: Path) -> bool:
+    """Whether ``path`` holds a fully-downloaded, verified dataset.
+
+    Presence of the three required files is not enough: a process that died
+    mid-extraction can leave a directory with some files but not others (or a
+    truncated file). Only the completion marker, written last after every
+    required file was checked, means the directory is safe to load.
+    """
+    return (path / _COMPLETE_MARKER).exists()
+
+
 def download(name: str, cache_dir: Path | None = None) -> Path:
     """Download and extract a registered BEIR dataset, verifying its sha256.
 
-    No-ops (and returns the existing directory) if the dataset already looks
-    downloaded.
+    No-ops (and returns the existing directory) if a complete download is
+    already present. Downloads and extracts into a temporary staging
+    directory first, checks the three required files are all there, then
+    marks it complete and moves it into place with a single rename — so a
+    process killed mid-download or mid-extraction never leaves behind a
+    directory that looks downloaded but isn't.
     """
     if name not in DATASET_REGISTRY:
         known = ", ".join(sorted(DATASET_REGISTRY))
@@ -100,22 +124,39 @@ def download(name: str, cache_dir: Path | None = None) -> Path:
     root = cache_dir if cache_dir is not None else cache_root()
     root.mkdir(parents=True, exist_ok=True)
     target_dir = root / name
-    if (target_dir / "corpus.jsonl").exists():
+    if _is_complete(target_dir):
         return target_dir
 
-    zip_path = root / f"{name}.zip"
-    with urlopen(spec.url) as response:  # noqa: S310 - fixed, vetted https URL
-        payload = response.read()
-    zip_path.write_bytes(payload)
+    with tempfile.TemporaryDirectory(dir=root) as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        zip_path = tmp_dir / f"{name}.zip"
+        with urlopen(spec.url) as response:  # noqa: S310 - fixed, vetted https URL
+            zip_path.write_bytes(response.read())
 
-    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
-    if digest != spec.sha256:
-        zip_path.unlink(missing_ok=True)
-        raise ValueError(f"sha256 mismatch for {name}: expected {spec.sha256}, got {digest}")
+        digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        if digest != spec.sha256:
+            raise ValueError(f"sha256 mismatch for {name}: expected {spec.sha256}, got {digest}")
 
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(root)
-    zip_path.unlink()
+        extract_dir = tmp_dir / "extracted"
+        extract_dir.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+
+        staged = extract_dir / name
+        for relative in _REQUIRED_FILES:
+            if not (staged / relative).exists():
+                raise ValueError(
+                    f"downloaded archive for {name!r} is missing required file {relative!r}"
+                )
+
+        (staged / _COMPLETE_MARKER).write_text(digest, encoding="utf-8")
+
+        # A stale, incomplete directory from an interrupted download (no
+        # marker) is discarded and replaced, never merged with.
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        shutil.move(str(staged), str(target_dir))
+
     return target_dir
 
 
@@ -135,32 +176,44 @@ def load_dir(path: Path, name: str, split: str = "test") -> Dataset:
         row = json.loads(line)
         corpus[row["_id"]] = Doc(doc_id=row["_id"], title=row.get("title", ""), text=row["text"])
 
+    queries_bytes = queries_path.read_bytes()
+    queries_sha256 = hashlib.sha256(queries_bytes).hexdigest()
+
     queries: dict[str, str] = {}
-    for line in queries_path.read_text(encoding="utf-8").splitlines():
+    for line in queries_bytes.decode("utf-8").splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         queries[row["_id"]] = row["text"]
 
+    qrels_bytes = qrels_path.read_bytes()
+    qrels_sha256 = hashlib.sha256(qrels_bytes).hexdigest()
+
     qrels: dict[str, dict[str, int]] = {}
-    with qrels_path.open("r", encoding="utf-8") as fh:
-        lines = fh.readlines()
+    lines = qrels_bytes.decode("utf-8").splitlines()
     start = 1 if lines and lines[0].startswith("query-id") else 0
     for line in lines[start:]:
         if not line.strip():
             continue
-        query_id, corpus_id, score = line.rstrip("\n").split("\t")
+        query_id, corpus_id, score = line.split("\t")
         qrels.setdefault(query_id, {})[corpus_id] = int(score)
 
     return Dataset(
-        name=name, corpus=corpus, queries=queries, qrels=qrels, corpus_sha256=corpus_sha256
+        name=name,
+        corpus=corpus,
+        queries=queries,
+        qrels=qrels,
+        corpus_sha256=corpus_sha256,
+        queries_sha256=queries_sha256,
+        qrels_sha256=qrels_sha256,
+        split=split,
     )
 
 
 def load(name: str, cache_dir: Path | None = None, split: str = "test") -> Dataset:
     """Load a dataset from the cache, raising if it hasn't been downloaded yet."""
     path = dataset_dir(name, cache_dir)
-    if not (path / "corpus.jsonl").exists():
+    if not _is_complete(path):
         raise FileNotFoundError(
             f"dataset {name!r} not found in {path}; run `rbench download {name}` first"
         )
