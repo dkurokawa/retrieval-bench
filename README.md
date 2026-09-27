@@ -49,10 +49,10 @@ Datasets are **not** included in this repository; `rbench download` fetches them
 
 | Dataset  | Task                                 | Source / citation                                                                                                          | License (per source)                                                                    |
 | -------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| scifact  | Scientific claim verification retrieval | Wadden et al., *Fact or Fiction: Verifying Scientific Claims*, 2020. Distributed via [BeIR/scifact](https://huggingface.co/datasets/BeIR/scifact) | CC-BY-SA-4.0 (as listed on the HuggingFace dataset card) |
-| nfcorpus | Medical/nutrition information retrieval | Boteva et al., *A Full-Text Learning to Rank Dataset for Medical Information Retrieval*, 2016. Distributed via [BeIR/nfcorpus](https://huggingface.co/datasets/BeIR/nfcorpus) | CC-BY-SA-4.0 (as listed on the HuggingFace dataset card) |
+| scifact  | Scientific claim verification retrieval | Wadden et al., *Fact or Fiction: Verifying Scientific Claims*, 2020 ([allenai/scifact](https://github.com/allenai/scifact)) | Claims and annotations: CC BY 4.0. Abstracts (corpus): ODC-By 1.0, from S2ORC. Per the [original LICENSE](https://github.com/allenai/scifact/blob/master/LICENSE.md) |
+| nfcorpus | Medical/nutrition information retrieval | Boteva et al., *A Full-Text Learning to Rank Dataset for Medical Information Retrieval*, 2016 ([project page](https://www.cl.uni-heidelberg.de/statnlpgroup/nfcorpus/)) | Free for academic use; other uses of the NutritionFacts.org content require the author's terms. Per the project page |
 
-BEIR itself makes no license guarantee beyond re-hosting the original data (see its repository's disclaimer); the license column above reflects what each dataset's own HuggingFace card states at the time of writing. Verify against the source before any redistribution.
+The license column follows each dataset's original distributor, checked 2026-09-27. The BEIR re-hosts on HuggingFace list a different license (CC-BY-SA-4.0) on their cards; the original terms above take precedence. This repository only downloads the data for local evaluation and never redistributes it.
 
 ## Results (SciFact)
 
@@ -81,7 +81,7 @@ uv run pytest --cov=retrieval_bench --cov-fail-under=90
 
 ## What this is not
 
-Not a GitHub-hosted or PyPI-published package (this repo is local-only by design). Not an evaluation of LLM-generated answers — only retrieval is measured. Not a wrapper around any paid embedding API. Not tied to any specific product, business domain, or organization.
+Not a PyPI-published package. Not an evaluation of LLM-generated answers — only retrieval is measured. Not a wrapper around any paid embedding API. Not tied to any specific product, business domain, or organization.
 
 ## License
 
