@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import numpy
+import scipy
 
 from retrieval_bench.chunking import Chunk, chunk
 from retrieval_bench.datasets import Dataset
@@ -32,6 +34,7 @@ class RunResult:
     git_sha: str | None
     n_queries: int
     metrics: MetricResult
+    meta: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ class RunSummary:
     params: dict[str, Any]
     n_queries: int
     metrics: dict[str, float]
+    meta: dict[str, Any]
 
 
 def git_sha(cwd: Path | None = None) -> str | None:
@@ -66,6 +70,21 @@ def git_sha(cwd: Path | None = None) -> str | None:
     return sha or None
 
 
+def _dependency_versions() -> dict[str, str | None]:
+    """Versions of the libraries that most directly affect a run's numbers."""
+    try:
+        import sentence_transformers
+
+        st_version: str | None = sentence_transformers.__version__
+    except ImportError:
+        st_version = None
+    return {
+        "numpy": numpy.__version__,
+        "scipy": scipy.__version__,
+        "sentence_transformers": st_version,
+    }
+
+
 def run(
     dataset: Dataset,
     retriever: Retriever,
@@ -76,14 +95,25 @@ def run(
     chunk_overlap: int,
     k_search: int = 100,
 ) -> RunResult:
-    """Chunk ``dataset``, index it with ``retriever``, and evaluate all queries."""
+    """Chunk ``dataset``, index it with ``retriever``, and evaluate it.
+
+    Only queries that have at least one qrels judgment in the loaded split are
+    searched (a shared queries.jsonl across BEIR splits can otherwise include
+    queries with no judgments in this split at all). ``n_queries`` on the
+    result is the number of those queries that actually contributed to the
+    reported means (i.e. had at least one positively-relevant document;
+    per_query in the returned metrics has exactly this many entries).
+    """
     chunks: list[Chunk] = []
     for doc in dataset.corpus.values():
         chunks.extend(chunk(doc, chunk_size, chunk_overlap))
     retriever.index(chunks)
 
     run_ranked: dict[str, list[str]] = {}
-    for query_id, query_text in dataset.queries.items():
+    for query_id in dataset.qrels:
+        query_text = dataset.queries.get(query_id)
+        if query_text is None:
+            continue
         results = retriever.search(query_text, k_search)
         run_ranked[query_id] = [doc_id for doc_id, _ in results]
 
@@ -93,6 +123,14 @@ def run(
         "chunk_overlap": chunk_overlap,
         **retriever_params,
     }
+    meta: dict[str, Any] = {
+        "corpus_sha256": dataset.corpus_sha256,
+        "queries_sha256": dataset.queries_sha256,
+        "qrels_sha256": dataset.qrels_sha256,
+        "split": dataset.split,
+        "encoder_identifier": getattr(retriever, "encoder_identifier", None),
+        "dependency_versions": _dependency_versions(),
+    }
     return RunResult(
         run_id=uuid.uuid4().hex,
         dataset=dataset.name,
@@ -100,8 +138,9 @@ def run(
         params=params,
         created_at=datetime.now(UTC),
         git_sha=git_sha(),
-        n_queries=len(dataset.queries),
+        n_queries=len(metric_result.per_query),
         metrics=metric_result,
+        meta=meta,
     )
 
 
@@ -122,7 +161,8 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
             retriever VARCHAR,
             params_json VARCHAR,
             git_sha VARCHAR,
-            n_queries INTEGER
+            n_queries INTEGER,
+            meta_json VARCHAR
         )
         """
     )
@@ -150,7 +190,7 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
 def save_run(con: duckdb.DuckDBPyConnection, result: RunResult) -> None:
     """Persist a run's metadata, mean metrics, and per-query metrics."""
     con.execute(
-        "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             result.run_id,
             result.created_at,
@@ -159,6 +199,7 @@ def save_run(con: duckdb.DuckDBPyConnection, result: RunResult) -> None:
             json.dumps(result.params, sort_keys=True),
             result.git_sha,
             result.n_queries,
+            json.dumps(result.meta, sort_keys=True),
         ],
     )
     for metric, value in result.metrics.mean.items():
@@ -175,18 +216,18 @@ def fetch_runs(con: duckdb.DuckDBPyConnection, dataset: str | None = None) -> li
     """Read back recorded runs (optionally filtered by dataset), with their mean metrics."""
     if dataset is not None:
         rows = con.execute(
-            "SELECT run_id, created_at, dataset, retriever, params_json, n_queries "
+            "SELECT run_id, created_at, dataset, retriever, params_json, n_queries, meta_json "
             "FROM runs WHERE dataset = ? ORDER BY created_at",
             [dataset],
         ).fetchall()
     else:
         rows = con.execute(
-            "SELECT run_id, created_at, dataset, retriever, params_json, n_queries "
+            "SELECT run_id, created_at, dataset, retriever, params_json, n_queries, meta_json "
             "FROM runs ORDER BY created_at"
         ).fetchall()
 
     summaries: list[RunSummary] = []
-    for run_id, created_at, ds, retriever, params_json, n_queries in rows:
+    for run_id, created_at, ds, retriever, params_json, n_queries, meta_json in rows:
         metric_rows = con.execute(
             "SELECT metric, value FROM run_metrics WHERE run_id = ?", [run_id]
         ).fetchall()
@@ -199,6 +240,7 @@ def fetch_runs(con: duckdb.DuckDBPyConnection, dataset: str | None = None) -> li
                 params=json.loads(params_json),
                 n_queries=n_queries,
                 metrics=dict(metric_rows),
+                meta=json.loads(meta_json) if meta_json is not None else {},
             )
         )
     return summaries

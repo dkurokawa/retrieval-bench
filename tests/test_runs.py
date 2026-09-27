@@ -8,6 +8,7 @@ import pytest
 from retrieval_bench.datasets import load_dir
 from retrieval_bench.metrics import evaluate
 from retrieval_bench.retrievers.bm25 import BM25Retriever
+from retrieval_bench.retrievers.dense import DenseRetriever
 from retrieval_bench.runs import connect, fetch_query_metrics, fetch_runs, git_sha, run, save_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "tiny"
@@ -28,10 +29,22 @@ def test_run_produces_metrics_consistent_with_direct_evaluate() -> None:
 
     assert result.dataset == "tiny"
     assert result.retriever == "bm25"
-    assert result.n_queries == len(dataset.queries)
+    # The tiny fixture has 4 queries, but only q1/q2/q3 have qrels judgments
+    # (q4 has none at all) -- n_queries counts queries actually averaged over,
+    # matching len(per_query), not every query in queries.jsonl.
+    assert result.n_queries == 3
+    assert result.n_queries == len(result.metrics.per_query)
     assert result.params == {"chunk_size": None, "chunk_overlap": 0, "k1": 0.9, "b": 0.4}
     assert result.git_sha is None or isinstance(result.git_sha, str)
     assert set(result.metrics.mean) == {"recall@10", "recall@100", "ndcg@10", "mrr@10"}
+
+    assert result.meta["corpus_sha256"] == dataset.corpus_sha256
+    assert result.meta["queries_sha256"] == dataset.queries_sha256
+    assert result.meta["qrels_sha256"] == dataset.qrels_sha256
+    assert result.meta["split"] == "test"
+    assert result.meta["encoder_identifier"] is None  # bm25 has no encoder
+    assert result.meta["dependency_versions"]["numpy"]
+    assert result.meta["dependency_versions"]["scipy"]
 
     # Re-running the same retriever over the same chunking should give the
     # same run-level ranking (BM25 is deterministic) and hence identical
@@ -72,6 +85,7 @@ def test_save_and_fetch_run_round_trip(tmp_path: Path) -> None:
     assert summary.retriever == "bm25"
     assert summary.params == result.params
     assert summary.metrics == result.metrics.mean
+    assert summary.meta == result.meta
 
     query_metrics = fetch_query_metrics(con, result.run_id)
     assert set(query_metrics) == set(result.metrics.per_query)
@@ -119,6 +133,33 @@ def test_git_sha_returns_none_when_git_is_unavailable(
     assert git_sha(cwd=tmp_path) is None
 
 
+def test_run_only_searches_queries_present_in_the_loaded_qrels_split() -> None:
+    dataset = load_dir(FIXTURE_DIR, name="tiny")
+    searched_queries: list[str] = []
+
+    class RecordingRetriever:
+        def index(self, chunks: object) -> None:
+            return None
+
+        def search(self, query: str, k: int) -> list[tuple[str, float]]:
+            searched_queries.append(query)
+            return []
+
+    run(
+        dataset,
+        RecordingRetriever(),  # type: ignore[arg-type]
+        retriever_name="recording",
+        retriever_params={},
+        chunk_size=None,
+        chunk_overlap=0,
+    )
+
+    # q4 ("unrelated query about nothing here") has no qrels row at all in
+    # the fixture's test split and must never be searched.
+    assert "unrelated query about nothing here" not in searched_queries
+    assert set(searched_queries) == {"banana fruit", "engine train", "water river"}
+
+
 def test_run_id_is_unique_across_runs() -> None:
     dataset = load_dir(FIXTURE_DIR, name="tiny")
     result_a = run(
@@ -138,3 +179,27 @@ def test_run_id_is_unique_across_runs() -> None:
         chunk_overlap=0,
     )
     assert result_a.run_id != result_b.run_id
+
+
+def test_run_records_the_encoder_identifier_for_a_dense_retriever(tmp_path: Path) -> None:
+    dataset = load_dir(FIXTURE_DIR, name="tiny")
+
+    class FakeEncoder:
+        def identifier(self) -> str:
+            return "fake-encoder-v1"
+
+        def encode(self, texts: object) -> object:
+            import numpy as np
+
+            return np.ones((len(list(texts)), 2), dtype=np.float64)  # type: ignore[arg-type]
+
+    retriever = DenseRetriever(model_name="fake-model", cache_dir=tmp_path, encoder=FakeEncoder())
+    result = run(
+        dataset,
+        retriever,
+        retriever_name="dense",
+        retriever_params={"model": "fake-model"},
+        chunk_size=None,
+        chunk_overlap=0,
+    )
+    assert result.meta["encoder_identifier"] == "fake-encoder-v1"
