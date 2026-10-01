@@ -10,6 +10,14 @@ The quality of a RAG answer is capped by something that happens before generatio
 
 This project only measures retrieval quality on public benchmark data. It does not evaluate generated answers, does not call any paid API, and is not tied to any specific product or business domain.
 
+## Architecture
+
+![architecture](docs/architecture.svg)
+
+A run chunks the corpus, indexes it (BM25 and/or dense), searches, fuses with RRF for the hybrid retriever, scores against the qrels, and appends the result to DuckDB. `compare` and `diff` read the recorded runs.
+
+構成図: chunk → index → search →（hybrid は RRF）→ score → DuckDB。`compare` / `diff` で run を比べる。
+
 ## Install
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
